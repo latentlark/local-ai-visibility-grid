@@ -224,13 +224,14 @@ async def load_once(ctx, query: str, lat: float, lng: float, engine: str, gl: st
     finally:
         stage['s'] = 'finish'
         try:
-            out['bytes'] = int(await pg.evaluate("()=>performance.getEntries().reduce((a,e)=>a+(e.transferSize||0),0)"))
+            out['bytes'] = int(await asyncio.wait_for(pg.evaluate(
+                "()=>performance.getEntries().reduce((a,e)=>a+(e.transferSize||0),0)"), 3))
         except Exception:  # noqa: BLE001
             out['bytes'] = 0
         out['pageSecs'] = round(time.time() - t0, 1)
         try:
-            await pg.close()
-        except Exception:  # noqa: BLE001
+            await asyncio.wait_for(pg.close(), 5)
+        except Exception:  # noqa: BLE001 - incl. timeout: the context is closed (or recycled) anyway
             pass
     return out
 
@@ -262,7 +263,7 @@ async def fetch_answer(router, query: str, lat: float, lng: float, engine: str, 
         finally:
             if owned:
                 try:
-                    await ctx.close()
+                    await asyncio.wait_for(ctx.close(), 10)
                 except Exception:  # noqa: BLE001
                     pass
         await router.report(kind, gen, r['status'])
