@@ -22,7 +22,7 @@ from .entities import (build_entities, domain_of, domain_type, enrich_with_maps,
 from .maps import MapsClient, norm, parse_maps_url
 from .report import summarize, to_csv, to_html
 from .routes import Router, us_timezone
-from .serp import fetch_answer, lean_should_continue, playwright_proxy
+from .serp import fetch_answer, playwright_proxy
 
 EVENTS = json.loads((pathlib.Path(__file__).parent / 'events.json').read_text())
 EV = {'google_aio': EVENTS['aiOverviewAnswer'], 'google_aimode': EVENTS['aiModeAnswer'], 'maps': EVENTS['mapsRankCheck']}
@@ -327,7 +327,7 @@ async def main() -> None:
                     'targetNameInText': False, 'targetOtherBranchMentioned': False,
                     'citedUrls': [], 'citedDomains': [], 'sourceDomains': [], 'citedDomainTypes': {}, 'targetSiteCited': False,
                     'attempts': raw.get('attempts'), 'blocks': raw.get('blocks'), 'secs': raw.get('secs'),
-                    'route': (raw.get('routes') or [None])[-1],
+                    'route': (raw.get('routes') or [None])[-1], 'gotoSecs': raw.get('gotoSecs'), 'waitSecs': raw.get('waitSecs'),
                     'transferBytes': raw.get('bytes'),
                     'error': raw.get('error'), 'charged': False, 'scrapedAt': now_iso(),
                 }
@@ -336,6 +336,7 @@ async def main() -> None:
                     _te = _time.time()
                     await enrich_with_maps(ents, mc, p['lat'], p['lng'], city, maps_cache)
                     stats_secs['enrichSecs'] += _time.time() - _te
+                    row['enrichSecs'] = round(_time.time() - _te, 1)
                     for e in ents:
                         wl = e.pop('_websiteLink', None)
                         if wl and not e.get('website'):
@@ -384,17 +385,20 @@ async def main() -> None:
                     await Actor.push_data(row)
                     rows.append(row)
                 Actor.log.info(f'{eng} p{p["pointIndex"]} q{questions.index(q)} s{s}: {raw["status"]}'
-                               f'{" target #" + str(row["targetPosition"]) if row["targetMentioned"] else ""} ({raw.get("secs")}s)')
+                               f'{" target #" + str(row["targetPosition"]) if row["targetMentioned"] else ""} ({raw.get("secs")}s: '
+                               f'load {raw.get("gotoSecs")}s, answer {raw.get("waitSecs")}s, {row["route"]}, try {raw.get("attempts")})')
 
         async with async_playwright() as pw:
             # Headful under the image's xvfb when a display exists: headless Chromium announces itself
             # ("HeadlessChrome" UA and client hints), which Google scores as a bot.
-            headless = not os.environ.get('DISPLAY')
+            headless = (not os.environ.get('DISPLAY')) if inp.get('_headless') is None else bool(inp.get('_headless'))
 
             async def launch():
                 return await pw.chromium.launch(headless=headless, args=['--disable-blink-features=AutomationControlled',
                                                                          '--disable-dev-shm-usage', '--no-first-run',
-                                                                         '--disable-gpu'])
+                                                                         '--disable-gpu', '--blink-settings=imagesEnabled=false',
+                                                                         '--disable-extensions', '--mute-audio',
+                                                                         '--disable-background-networking'])
             box = {'b': await launch()}
             ver = (box['b'].version or '131').split('.')[0]
             # Keep the browser's own platform and version (a Windows/131 UA on Linux/14x Chromium is a mismatch).
@@ -407,13 +411,6 @@ async def main() -> None:
                                                  viewport={'width': 1280, 'height': 900}, user_agent=ua,
                                                  proxy=playwright_proxy(proxy_url))
                 await ctx.add_cookies([{'name': 'CONSENT', 'value': 'YES+cb', 'domain': '.google.com', 'path': '/'}])
-
-                async def route(r):
-                    if lean_should_continue(r.request.url, r.request.resource_type):
-                        await r.continue_()
-                    else:
-                        await r.abort()
-                await ctx.route('**/*', route)
                 return ctx
 
             pcfg = proxy_cfg or fallback_cfg

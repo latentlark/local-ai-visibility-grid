@@ -76,6 +76,14 @@ def playwright_proxy(url: str | None) -> dict | None:
     return cfg
 
 
+# Blocked inside the browser (CDP Network.setBlockedURLs), not by a Python route handler: routing every request
+# through Python cost a CDP round trip per request, which on a quarter CPU core made each page take 20-40 s.
+BLOCK_PATTERNS = ['*.png*', '*.jpg*', '*.jpeg*', '*.gif*', '*.webp*', '*.svg*', '*.ico*', '*.woff*', '*.ttf*',
+                  '*.mp4*', '*.webm*', '*encrypted-tbn*', '*/gen_204*', '*/client_204*', '*/log?*', '*/maps/vt*',
+                  '*maps.googleapis.com*', '*googleadservices*', '*doubleclick*', '*youtube.com*', '*ytimg.com*',
+                  '*fonts.googleapis.com*', '*fonts.gstatic.com*', '*lh3.googleusercontent.com*', '*lh5.googleusercontent.com*']
+
+
 def lean_should_continue(url: str, rtype: str) -> bool:
     """Keep document/XHR/fetch plus Google scripts; drop images, CSS, fonts, media and third-party junk."""
     if rtype in ('image', 'media', 'font', 'stylesheet', 'ping', 'manifest'):
@@ -139,8 +147,8 @@ async def wait_for_answer(pg, engine: str) -> dict[str, Any]:
         await pg.wait_for_timeout(step)
         pr = await pg.evaluate(PROBE_JS, engine)
         if not pr.get('found'):
-            if engine == 'google_aio' and not seen and i >= 6:
-                break  # no AI Overview on this page (~5 s after the results rendered)
+            if engine == 'google_aio' and not seen and i >= 9:
+                break  # no AI Overview on this page (~8 s after the results rendered)
             continue
         seen = True
         n = pr.get('n') or -1
@@ -159,16 +167,14 @@ async def load_once(ctx, query: str, lat: float, lng: float, engine: str, gl: st
     """One attempt in one context. Returns {status, ...} with timings; never raises."""
     out: dict[str, Any] = {'status': 'error', 'bytes': 0, 'error': None}
     pg = await ctx.new_page()
-    nbytes = [0]
-
-    def _on_resp(resp):
-        try:
-            nbytes[0] += int(resp.headers.get('content-length') or 0)
-        except Exception:  # noqa: BLE001
-            pass
-    pg.on('response', _on_resp)
     t0 = time.time()
     try:
+        try:
+            cdp = await ctx.new_cdp_session(pg)
+            await cdp.send('Network.enable')
+            await cdp.send('Network.setBlockedURLs', {'urls': BLOCK_PATTERNS})
+        except Exception:  # noqa: BLE001 - non-Chromium: load everything
+            pass
         # domcontentloaded, not load: 'load' waited for every Google script and made checks take ~40 s.
         await pg.goto(search_url(query, lat, lng, engine, gl, hl), timeout=30000, wait_until='domcontentloaded')
         out['gotoSecs'] = round(time.time() - t0, 1)
@@ -195,13 +201,17 @@ async def load_once(ctx, query: str, lat: float, lng: float, engine: str, gl: st
                         r = await pg.evaluate(EXTRACT_JS, engine)
                 out.update(r)
                 out['status'] = classify_status(engine, r)
+        out['waitSecs'] = round(time.time() - t0 - out.get('gotoSecs', 0), 1)
         if screenshot:
             out['screenshot'] = await pg.screenshot()
     except Exception as e:  # noqa: BLE001
         out['status'] = 'error'
         out['error'] = f'{type(e).__name__}: {e}'.split('\n')[0][:300]
     finally:
-        out['bytes'] = nbytes[0]
+        try:
+            out['bytes'] = int(await pg.evaluate("()=>performance.getEntries().reduce((a,e)=>a+(e.transferSize||0),0)"))
+        except Exception:  # noqa: BLE001
+            out['bytes'] = 0
         out['pageSecs'] = round(time.time() - t0, 1)
         try:
             await pg.close()
