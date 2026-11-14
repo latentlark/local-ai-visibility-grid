@@ -92,12 +92,16 @@ def build_entities(raw: dict[str, Any]) -> list[dict[str, Any]]:
 async def enrich_with_maps(ents: list[dict[str, Any]], mc, lat: float, lng: float, city_hint: str,
                            cache: dict, max_km: float = 60) -> None:
     """Attach Google Maps place IDs. Cards: confirm by hex ID. Text-only names: best fuzzy match near the point."""
-    for e in ents:
+    import asyncio
+    sem = asyncio.Semaphore(3)  # lookups of one answer's businesses in parallel (was one after another)
+
+    async def one(e: dict[str, Any]) -> None:
         key = e['hexId'] or ('n:' + norm(e['name']) + f':{round(lat, 2)},{round(lng, 2)}')
         if key not in cache:
             q = e['name'] + (f' {e["address"]}' if e.get('address') else (f' {city_hint}' if city_hint else ''))
             try:
-                res = await mc.ranked(q, lat, lng, 12.0, 5)
+                async with sem:
+                    res = await mc.ranked(q, lat, lng, 12.0, 5)
             except Exception:  # noqa: BLE001
                 res = []
             hit, how = None, None
@@ -128,6 +132,8 @@ async def enrich_with_maps(ents: list[dict[str, Any]], mc, lat: float, lng: floa
             e['website'] = hit.get('website')
             e['rating'] = hit.get('rating')
             e['reviewCount'] = hit.get('reviewCount')
+
+    await asyncio.gather(*(one(e) for e in ents))
 
 
 def is_target(e: dict[str, Any], t: dict[str, Any]) -> bool:

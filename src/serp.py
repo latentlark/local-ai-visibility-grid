@@ -1,9 +1,10 @@
 """Load one Google AI Overview / AI Mode answer in a real browser and extract text, business cards and links.
 
-Logged-out, one fresh browser context per answer, location pinned with Google's `uule` parameter.
+Logged-out, location pinned with Google's `uule` parameter.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 import urllib.parse
 from typing import Any
@@ -12,7 +13,7 @@ from urllib.parse import unquote, urlparse
 from .maps import uule_for
 
 UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
-      'Chrome/131.0.0.0 Safari/537.36')
+      'Chrome/131.0.0.0 Safari/537.36')  # legacy; the browser now keeps its own matching UA (see main.make_ctx)
 
 # Runs in the page. Returns {found, text, cards[], links[]} for the AI answer block only.
 EXTRACT_JS = r'''(engine)=>{
@@ -108,16 +109,41 @@ def classify_status(engine: str, r: dict[str, Any]) -> str:
     return 'answer' if len(text) > 300 else 'no_answer'
 
 
+# Cheap poll: is the AI block there yet and how long is its text? (The full EXTRACT_JS walks every card and link,
+# far too heavy to run every second on a quarter CPU core.)
+PROBE_JS = r'''(engine)=>{
+ if(engine==='google_aio'){
+   const OK=new Set(['H1','H2','DIV','SPAN']);
+   const w=document.createTreeWalker(document.body||document.documentElement, NodeFilter.SHOW_TEXT,
+     {acceptNode:(n)=>n.nodeValue&&n.nodeValue.length<20&&n.nodeValue.trim()==='AI Overview'?1:3});
+   let heading=null;
+   for(let t=w.nextNode(); t; t=w.nextNode()){
+     const e=t.parentElement;
+     if(e&&OK.has(e.tagName)&&e.childElementCount<=1&&e.innerText&&e.innerText.trim()==='AI Overview'){heading=e;break;}
+   }
+   if(!heading) return {found:false, n:-1};
+   let root=heading; const learn=document.querySelector('a[href*="p=ai_overviews"]');
+   if(learn){while(root&&!root.contains(learn)) root=root.parentElement;} else {for(let i=0;i<6&&root.parentElement;i++) root=root.parentElement;}
+   return {found:!!root, n:root?(root.innerText||'').length:-1};
+ }
+ const root=document.querySelector('[role=main]')||document.body; return {found:!!root, n:root?(root.innerText||'').length:-1};
+}'''
+
+
 async def wait_for_answer(pg, engine: str) -> dict[str, Any]:
-    """Poll until the AI block exists and its text stops growing (AI answers stream in)."""
-    limit = 24 if engine == 'google_aimode' else 12
-    last, stable, r = -1, 0, {'found': False}
+    """Poll (cheaply) until the AI block exists and its text stops growing (AI answers stream in), then extract once."""
+    limit = 24 if engine == 'google_aimode' else 14
+    step = 800
+    last, stable, seen = -1, 0, False
     for i in range(limit):
-        await pg.wait_for_timeout(1000)
-        r = await pg.evaluate(EXTRACT_JS, engine)
-        if not r.get('found') and engine == 'google_aio' and i >= 6:
-            break  # no AI Overview on this page
-        n = len(r.get('text') or '') if r.get('found') else -1
+        await pg.wait_for_timeout(step)
+        pr = await pg.evaluate(PROBE_JS, engine)
+        if not pr.get('found'):
+            if engine == 'google_aio' and not seen and i >= 6:
+                break  # no AI Overview on this page (~5 s after the results rendered)
+            continue
+        seen = True
+        n = pr.get('n') or -1
         if n > 300 and n == last:
             stable += 1
             if stable >= 2:
@@ -125,75 +151,97 @@ async def wait_for_answer(pg, engine: str) -> dict[str, Any]:
         else:
             stable = 0
         last = n
-    return r
+    return await pg.evaluate(EXTRACT_JS, engine)
 
 
-async def fetch_answer(browser, query: str, lat: float, lng: float, engine: str, *, gl: str = 'us', hl: str = 'en',
-                       retries: int = 2, block_assets: bool = True, screenshot: bool = False,
-                       proxy: dict | None = None, proxy_url_fn=None, context=None) -> dict[str, Any]:
-    rec: dict[str, Any] = {'status': 'error', 'attempts': 0, 'blocks': 0, 'bytes': 0, 'error': None}
-    t0 = time.time()
-    shared = context
-    for att in range(retries):
-        rec['attempts'] += 1
-        own_ctx = shared is None
-        if own_ctx:
-            pxy = playwright_proxy(await proxy_url_fn()) if proxy_url_fn is not None else proxy
-            ctx = await browser.new_context(locale=f'{hl}-{gl.upper()}', timezone_id='America/New_York',
-                                            viewport={'width': 1280, 'height': 1000}, user_agent=UA, proxy=pxy)
-            await ctx.add_cookies([{'name': 'CONSENT', 'value': 'YES+cb', 'domain': '.google.com', 'path': '/'}])
-            if block_assets:
-                async def route(r):
-                    if lean_should_continue(r.request.url, r.request.resource_type):
-                        await r.continue_()
-                    else:
-                        await r.abort()
-                await ctx.route('**/*', route)
-        else:
-            ctx = shared
-        pg = await ctx.new_page()
-        nbytes = [0]
+async def load_once(ctx, query: str, lat: float, lng: float, engine: str, gl: str, hl: str,
+                    screenshot: bool) -> dict[str, Any]:
+    """One attempt in one context. Returns {status, ...} with timings; never raises."""
+    out: dict[str, Any] = {'status': 'error', 'bytes': 0, 'error': None}
+    pg = await ctx.new_page()
+    nbytes = [0]
 
-        async def _on_resp(resp):
-            try:
-                nbytes[0] += len(await resp.body())
-            except Exception:
-                nbytes[0] += int(resp.headers.get('content-length') or 0)
-        pg.on('response', _on_resp)
+    def _on_resp(resp):
         try:
-            await pg.goto(search_url(query, lat, lng, engine, gl, hl), timeout=45000, wait_until='load')
+            nbytes[0] += int(resp.headers.get('content-length') or 0)
+        except Exception:  # noqa: BLE001
+            pass
+    pg.on('response', _on_resp)
+    t0 = time.time()
+    try:
+        # domcontentloaded, not load: 'load' waited for every Google script and made checks take ~40 s.
+        await pg.goto(search_url(query, lat, lng, engine, gl, hl), timeout=30000, wait_until='domcontentloaded')
+        out['gotoSecs'] = round(time.time() - t0, 1)
+        if is_blocked(pg.url, ''):
+            out['status'] = 'blocked'
+        else:
             head = (await pg.content())[:30000]
             if is_blocked(pg.url, head):
-                rec['blocks'] += 1
-                rec['status'] = 'blocked'
+                out['status'] = 'blocked'
             else:
                 r = await wait_for_answer(pg, engine)
-                for label in ('Show more', 'Show all'):
-                    try:
-                        for bt in await pg.get_by_role('button', name=label).all():
-                            if await bt.is_visible():
-                                await bt.click(timeout=2000)
-                                await pg.wait_for_timeout(1200)
-                    except Exception:  # noqa: BLE001
-                        pass
                 if r.get('found'):
-                    r = await pg.evaluate(EXTRACT_JS, engine)
-                rec.update(r)
-                rec['status'] = classify_status(engine, r)
-            if screenshot:
-                rec['screenshot'] = await pg.screenshot()
-        except Exception as e:  # noqa: BLE001
-            rec['status'] = 'error'
-            rec['error'] = f'{type(e).__name__}: {e}'[:300]
+                    clicked = False
+                    for label in ('Show more', 'Show all'):
+                        try:
+                            for bt in await pg.get_by_role('button', name=label).all():
+                                if await bt.is_visible():
+                                    await bt.click(timeout=2000)
+                                    clicked = True
+                        except Exception:  # noqa: BLE001
+                            pass
+                    if clicked:
+                        await pg.wait_for_timeout(1000)
+                        r = await pg.evaluate(EXTRACT_JS, engine)
+                out.update(r)
+                out['status'] = classify_status(engine, r)
+        if screenshot:
+            out['screenshot'] = await pg.screenshot()
+    except Exception as e:  # noqa: BLE001
+        out['status'] = 'error'
+        out['error'] = f'{type(e).__name__}: {e}'.split('\n')[0][:300]
+    finally:
+        out['bytes'] = nbytes[0]
+        out['pageSecs'] = round(time.time() - t0, 1)
+        try:
+            await pg.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
+async def fetch_answer(router, query: str, lat: float, lng: float, engine: str, *, gl: str = 'us', hl: str = 'en',
+                       retries: int = 3, screenshot: bool = False, deadline: float | None = None) -> dict[str, Any]:
+    """Load one answer. A blocked try never reuses its context or proxy session: the router hands the next try a
+    fresh cookie jar (and a new proxy IP when proxies are available)."""
+    rec: dict[str, Any] = {'status': 'error', 'attempts': 0, 'blocks': 0, 'bytes': 0, 'error': None, 'routes': []}
+    t0 = time.time()
+    for att in range(retries):
+        if deadline is not None and time.time() >= deadline:
+            break
+        w = router.wait_secs()
+        if w > 0:
+            if deadline is not None and time.time() + w >= deadline:
+                break
+            await asyncio.sleep(w)
+        rec['attempts'] += 1
+        ctx, kind, owned, gen = await router.acquire()
+        rec['routes'].append(kind)
+        try:
+            r = await load_once(ctx, query, lat, lng, engine, gl, hl, screenshot)
         finally:
-            rec['bytes'] += nbytes[0]
-            try:
-                await pg.close()
-            except Exception:
-                pass
-            if own_ctx:
-                await ctx.close()
+            if owned:
+                try:
+                    await ctx.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        await router.report(kind, gen, r['status'])
+        rec['bytes'] += r.pop('bytes', 0)
+        if r['status'] == 'blocked':
+            rec['blocks'] += 1
+        rec.update(r)
         if rec['status'] in ('answer', 'no_answer'):
             break
+    router.check_done(rec['status'])
     rec['secs'] = round(time.time() - t0, 1)
     return rec

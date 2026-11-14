@@ -5,6 +5,7 @@ import time as _time
 
 import asyncio
 import json
+import os
 import pathlib
 import random
 import re
@@ -20,7 +21,8 @@ from .entities import (build_entities, domain_of, domain_type, enrich_with_maps,
                        is_target, same_brand, SKIP_LINK, cid_of)
 from .maps import MapsClient, norm, parse_maps_url
 from .report import summarize, to_csv, to_html
-from .serp import fetch_answer
+from .routes import Router, us_timezone
+from .serp import fetch_answer, lean_should_continue, playwright_proxy
 
 EVENTS = json.loads((pathlib.Path(__file__).parent / 'events.json').read_text())
 EV = {'google_aio': EVENTS['aiOverviewAnswer'], 'google_aimode': EVENTS['aiModeAnswer'], 'maps': EVENTS['mapsRankCheck']}
@@ -28,6 +30,11 @@ MAX_GRID = 7
 MAX_QUESTIONS = 10
 MAX_SAMPLES = 5
 AIMODE_STOP_AFTER_BLOCKS = 4
+BLOCK_STOP_CHECKS = 8  # this many checks blocked in a row with no fresh route left: stop (rest free)
+
+
+def gl_in(inp: dict[str, Any]) -> str:
+    return (inp.get('country') or 'us').lower()
 
 
 def now_iso() -> str:
@@ -166,6 +173,14 @@ async def main() -> None:
         pc = inp.get('proxyConfiguration') or {}
         if pc.get('useApifyProxy') or pc.get('proxyUrls'):
             proxy_cfg = await Actor.create_proxy_configuration(actor_proxy_input=pc)
+        # Block fallback: when Google blocks the run's own IP, retry through Apify datacenter proxy (US, new IP per
+        # try). Datacenter proxy has no per-GB fee. Off with proxyFallback=false.
+        fallback_cfg = None
+        if not proxy_cfg and inp.get('proxyFallback', True) is not False and Actor.is_at_home():
+            try:
+                fallback_cfg = await Actor.create_proxy_configuration(country_code='US' if gl_in(inp) == 'us' else None)
+            except Exception as e:  # noqa: BLE001
+                Actor.log.info(f'No Apify Proxy fallback available ({type(e).__name__}); using the direct IP only.')
         mc = MapsClient(proxy_url_fn=(lambda: proxy_cfg.new_url()) if proxy_cfg else None, hl=hl, gl=gl)
 
         # Points
@@ -219,6 +234,8 @@ async def main() -> None:
         rank_cache: dict[tuple[int, str], dict[str, Any]] = {}
         rank_locks: dict[tuple[int, str], asyncio.Lock] = {}
         rows: list[dict[str, Any]] = []
+        stats_secs = {'n': 0, 'gotoSecs': 0.0, 'pageSecs': 0.0, 'enrichSecs': 0.0}
+        router_box: dict[str, Router] = {}
         sem = asyncio.Semaphore(conc)
         push_lock = asyncio.Lock()
         redir = Redirects()
@@ -271,6 +288,9 @@ async def main() -> None:
                 if deadline is not None and _time.time() >= deadline:
                     state['stop'] = 'run time budget reached (unfinished checks were not run and not charged)'
                     return
+                if router_box['r'].blocked_in_row >= BLOCK_STOP_CHECKS and not router_box['r'].proxy_ok():
+                    state['stop'] = ('blocked by Google on every route (unfinished checks were not run and not charged)')
+                    return
                 if eng == 'google_aimode' and state['aimode_off']:
                     row_status = 'skipped_aimode_blocked'
                     raw = {'status': row_status}
@@ -284,15 +304,16 @@ async def main() -> None:
                     state['inflight'] += 1
                     try:
                         if inp.get('paceRequests', True) is not False:
-                            await asyncio.sleep(2.0 + random.random() * 2.5)
-                        raw = await fetch_answer(browser_box['b'], q, p['lat'], p['lng'], eng, gl=gl, hl=hl,
-                                                 retries=2 if eng == 'google_aio' else 3, screenshot=shots,
-                                                 proxy_url_fn=(proxy_cfg.new_url if proxy_cfg else None),
-                                                 context=browser_box.get('ctx'))
+                            await asyncio.sleep(1.5 + random.random() * 2.0)
+                        raw = await fetch_answer(router_box['r'], q, p['lat'], p['lng'], eng, gl=gl, hl=hl,
+                                                 retries=3, screenshot=shots, deadline=deadline)
                     finally:
                         state['inflight'] -= 1
                     if raw['status'] == 'error' and 'closed' in (raw.get('error') or '').lower():
                         await browser_box['relaunch']()
+                    stats_secs['n'] += 1
+                    for k in ('gotoSecs', 'pageSecs'):
+                        stats_secs[k] += raw.get(k) or 0
                 if eng == 'google_aimode' and raw['status'] != 'skipped_aimode_blocked':
                     state['aimode_blocks_in_row'] = state['aimode_blocks_in_row'] + 1 if raw['status'] == 'blocked' else 0
                     if state['aimode_blocks_in_row'] >= AIMODE_STOP_AFTER_BLOCKS:
@@ -306,12 +327,15 @@ async def main() -> None:
                     'targetNameInText': False, 'targetOtherBranchMentioned': False,
                     'citedUrls': [], 'citedDomains': [], 'sourceDomains': [], 'citedDomainTypes': {}, 'targetSiteCited': False,
                     'attempts': raw.get('attempts'), 'blocks': raw.get('blocks'), 'secs': raw.get('secs'),
+                    'route': (raw.get('routes') or [None])[-1],
                     'transferBytes': raw.get('bytes'),
                     'error': raw.get('error'), 'charged': False, 'scrapedAt': now_iso(),
                 }
                 if found:
                     ents = build_entities(raw)
+                    _te = _time.time()
                     await enrich_with_maps(ents, mc, p['lat'], p['lng'], city, maps_cache)
+                    stats_secs['enrichSecs'] += _time.time() - _te
                     for e in ents:
                         wl = e.pop('_websiteLink', None)
                         if wl and not e.get('website'):
@@ -363,17 +387,27 @@ async def main() -> None:
                                f'{" target #" + str(row["targetPosition"]) if row["targetMentioned"] else ""} ({raw.get("secs")}s)')
 
         async with async_playwright() as pw:
-            async def launch():
-                return await pw.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled',
-                                                                     '--disable-dev-shm-usage'])
-            box = {'b': await launch(), 'ctx': None}
+            # Headful under the image's xvfb when a display exists: headless Chromium announces itself
+            # ("HeadlessChrome" UA and client hints), which Google scores as a bot.
+            headless = not os.environ.get('DISPLAY')
 
-            async def make_ctx():
-                # Reuse one context (consent cookie + lean routes) when not rotating a proxy.
-                from .serp import UA, lean_should_continue
-                ctx = await box['b'].new_context(locale=f'{hl}-{gl.upper()}', timezone_id='America/New_York',
-                                                 viewport={'width': 1280, 'height': 1000}, user_agent=UA)
+            async def launch():
+                return await pw.chromium.launch(headless=headless, args=['--disable-blink-features=AutomationControlled',
+                                                                         '--disable-dev-shm-usage', '--no-first-run',
+                                                                         '--disable-gpu'])
+            box = {'b': await launch()}
+            ver = (box['b'].version or '131').split('.')[0]
+            # Keep the browser's own platform and version (a Windows/131 UA on Linux/14x Chromium is a mismatch).
+            ua = None if not headless else (f'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) '
+                                             f'Chrome/{ver}.0.0.0 Safari/537.36')
+            tz = us_timezone(center[1]) if gl == 'us' and center else 'America/New_York'
+
+            async def make_ctx(proxy_url):
+                ctx = await box['b'].new_context(locale=f'{hl}-{gl.upper()}', timezone_id=tz,
+                                                 viewport={'width': 1280, 'height': 900}, user_agent=ua,
+                                                 proxy=playwright_proxy(proxy_url))
                 await ctx.add_cookies([{'name': 'CONSENT', 'value': 'YES+cb', 'domain': '.google.com', 'path': '/'}])
+
                 async def route(r):
                     if lean_should_continue(r.request.url, r.request.resource_type):
                         await r.continue_()
@@ -382,30 +416,31 @@ async def main() -> None:
                 await ctx.route('**/*', route)
                 return ctx
 
-            if not proxy_cfg:
-                box['ctx'] = await make_ctx()
+            pcfg = proxy_cfg or fallback_cfg
+            proxy_fn = (lambda sid: pcfg.new_url(session_id=sid)) if pcfg else None
+            router_box['r'] = Router(make_ctx, proxy_fn, prefer_proxy=bool(proxy_cfg))
 
             async def relaunch():
-                try:
-                    if box.get('ctx'):
-                        await box['ctx'].close()
-                except Exception:  # noqa: BLE001
-                    pass
+                await router_box['r'].close()
                 try:
                     await box['b'].close()
                 except Exception:  # noqa: BLE001
                     pass
                 box['b'] = await launch()
-                box['ctx'] = await make_ctx() if not proxy_cfg else None
             box['relaunch'] = relaunch
             await asyncio.gather(*(run(box, t) for t in tasks))
+            if (state['stop'] or '').startswith('blocked by Google'):
+                await Actor.push_data({'status': 'skipped_blocked', 'answerFound': False, 'charged': False,
+                                       'checksNotRun': max(0, len(tasks) - len(rows)), 'scrapedAt': now_iso(),
+                                       'error': 'Google blocked every route several times in a row, so the run stopped '
+                                                'early: these checks were not run and not charged. Rerun later, or set a '
+                                                'RESIDENTIAL US proxy in the Proxy field.'})
             if (state['stop'] or '').startswith('run time budget'):
                 await Actor.push_data({'status': 'skipped_time_limit', 'answerFound': False, 'charged': False,
                                        'checksNotRun': max(0, len(tasks) - len(rows)), 'scrapedAt': now_iso(),
                                        'error': 'Run time budget reached: these checks were not run and not charged. '
                                                 'Raise the run timeout or lower gridSize/samplesPerPoint.'})
-            if box.get('ctx'):
-                await box['ctx'].close()
+            await router_box['r'].close()
             await box['b'].close()
         await mc.close()
         await redir.close()
@@ -413,7 +448,9 @@ async def main() -> None:
         meta = {'questions': questions, 'pointsCount': len(pts), 'gridSize': n, 'gridSpacingKm': round(spacing, 3) if spacing else None,
                 'samplesPerPoint': samples, 'engines': engines, 'country': gl, 'language': hl,
                 'chargedEvents': state['charged'], 'stoppedEarly': state['stop'], 'aiModeAutoStopped': state['aimode_off'],
-                'mapsRequests': mc.requests, 'finishedAt': now_iso()}
+                'mapsRequests': mc.requests, 'routing': router_box['r'].stats if router_box else None,
+                'avgSecs': {k: round(v / max(1, stats_secs['n']), 1) for k, v in stats_secs.items() if k != 'n'},
+                'finishedAt': now_iso()}
         summary = summarize(rows, target, meta)
         await Actor.set_value('SUMMARY', summary)
         await Actor.set_value('REPORT.html', to_html(summary), content_type='text/html; charset=utf-8')
