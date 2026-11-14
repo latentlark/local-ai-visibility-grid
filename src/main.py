@@ -178,10 +178,10 @@ async def main() -> None:
         pc = inp.get('proxyConfiguration') or {}
         if pc.get('useApifyProxy') or pc.get('proxyUrls'):
             proxy_cfg = await Actor.create_proxy_configuration(actor_proxy_input=pc)
-        # Block fallback: when Google blocks the run's own IP, retry through Apify datacenter proxy (US, new IP per
-        # try). Datacenter proxy has no per-GB fee. Off with proxyFallback=false.
+        # Optional block fallback through Apify datacenter proxy (new IP per try). Off by default: tested 2026-11-14,
+        # Google pages did not load through the datacenter pool (every try timed out), so it only cost time.
         fallback_cfg = None
-        if not proxy_cfg and inp.get('proxyFallback', True) is not False and Actor.is_at_home():
+        if not proxy_cfg and inp.get('proxyFallback') is True and Actor.is_at_home():
             try:
                 fallback_cfg = await Actor.create_proxy_configuration(country_code='US' if gl_in(inp) == 'us' else None)
             except Exception as e:  # noqa: BLE001

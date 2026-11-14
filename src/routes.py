@@ -4,8 +4,8 @@ Root cause of the 2026-11-14 scale test (63/100 blocked): every check came from 
 browser context. After ~35 searches Google flagged that IP + cookie jar, and every later check (and its retry, made
 in the same flagged context) hit /sorry/. Fixes here:
 - a block throws the flagged context away (new cookie jar) and cools the direct IP down with growing backoff;
-- while the direct IP cools, checks go through Apify Proxy (datacenter, US) with a fresh session (new IP) per try,
-  and a blocked session is never reused. Datacenter proxy has no per-GB fee;
+- with a proxy (the user's Proxy setting), every try gets a fresh session (new IP) and a blocked session is never
+  reused; without one, the run waits out the cool-down instead of retrying into the block;
 - if every route keeps getting blocked, the run stops early instead of grinding through blocked checks
   (unfinished checks are marked and never charged).
 """
@@ -72,7 +72,7 @@ class Router:
         if self.direct_ok() or not self.proxy_ok():
             async with self._lock:
                 if self.direct_ctx is None:
-                    self.direct_ctx = await self.make_ctx(None)
+                    self.direct_ctx = await asyncio.wait_for(self.make_ctx(None), 30)
                     self.direct_gen += 1
                 self.stats['direct'] += 1
                 return self.direct_ctx, 'direct', False, self.direct_gen
@@ -82,7 +82,7 @@ class Router:
         sid = f'lavg{random.randrange(10**9)}'
         url = await self.proxy_url_fn(sid)
         self.stats['proxy'] += 1
-        return await self.make_ctx(url), 'proxy', True, 0
+        return await asyncio.wait_for(self.make_ctx(url), 30), 'proxy', True, 0
 
     async def report(self, kind: str, gen: int, status: str) -> None:
         blocked = status == 'blocked'
@@ -95,7 +95,7 @@ class Router:
                         old, self.direct_ctx = self.direct_ctx, None
                         self.stats['contextsRecycled'] += 1
                         try:
-                            await old.close()
+                            await asyncio.wait_for(old.close(), 10)
                         except Exception:  # noqa: BLE001
                             pass
                         self.direct_streak += 1

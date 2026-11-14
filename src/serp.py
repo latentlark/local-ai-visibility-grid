@@ -251,7 +251,11 @@ async def fetch_answer(router, query: str, lat: float, lng: float, engine: str, 
                 break
             await asyncio.sleep(w)
         rec['attempts'] += 1
-        ctx, kind, owned, gen = await router.acquire()
+        try:
+            ctx, kind, owned, gen = await router.acquire()
+        except Exception as e:  # noqa: BLE001 - incl. a stuck new_context
+            rec.update(status='error', error=f'{type(e).__name__}: could not open a browser context')
+            continue
         rec['routes'].append(kind)
         try:
             # hard cap per try: a stuck page (proxy stall, frozen renderer) must never hang the run
