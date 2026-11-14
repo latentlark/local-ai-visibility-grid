@@ -403,7 +403,13 @@ async def main() -> None:
                                                                          '--disable-dev-shm-usage', '--no-first-run',
                                                                          '--disable-gpu', '--blink-settings=imagesEnabled=false',
                                                                          '--disable-extensions', '--mute-audio',
-                                                                         '--disable-background-networking'])
+                                                                         '--disable-background-networking',
+                                                                         # every check opens its own window; never throttle
+                                                                         # timers of a window xvfb reports as hidden
+                                                                         '--disable-background-timer-throttling',
+                                                                         '--disable-backgrounding-occluded-windows',
+                                                                         '--disable-renderer-backgrounding',
+                                                                         '--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion'])
             box = {'b': await launch()}
             ver = (box['b'].version or '131').split('.')[0]
             # Keep the browser's own platform and version (a Windows/131 UA on Linux/14x Chromium is a mismatch).

@@ -12,6 +12,7 @@ in the same flagged context) hit /sorry/. Fixes here:
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import time
 from typing import Any, Awaitable, Callable
@@ -75,6 +76,9 @@ class Router:
                     self.direct_gen += 1
                 self.stats['direct'] += 1
                 return self.direct_ctx, 'direct', False, self.direct_gen
+        if self.stats['proxy'] == 0:
+            logging.getLogger('apify').info('Google blocked the direct IP: next checks go through Apify Proxy '
+                                            '(datacenter, new IP per try) while it cools down.')
         sid = f'lavg{random.randrange(10**9)}'
         url = await self.proxy_url_fn(sid)
         self.stats['proxy'] += 1
@@ -105,6 +109,7 @@ class Router:
                 self.proxy_blocks_in_row += 1
                 if self.proxy_blocks_in_row >= 12 and not self.prefer_proxy:
                     self.proxy_dead = True  # this proxy pool is burned for Google; stop paying time for it
+                    logging.getLogger('apify').info('Apify Proxy IPs are blocked by Google too: back to the direct IP.')
             elif status in ('answer', 'no_answer'):
                 self.proxy_blocks_in_row = 0
                 self.proxy_errors_in_row = 0

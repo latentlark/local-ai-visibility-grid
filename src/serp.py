@@ -241,7 +241,10 @@ async def fetch_answer(router, query: str, lat: float, lng: float, engine: str, 
         ctx, kind, owned, gen = await router.acquire()
         rec['routes'].append(kind)
         try:
-            r = await load_once(ctx, query, lat, lng, engine, gl, hl, screenshot)
+            # hard cap per try: a stuck page (proxy stall, frozen renderer) must never hang the run
+            r = await asyncio.wait_for(load_once(ctx, query, lat, lng, engine, gl, hl, screenshot), 75)
+        except asyncio.TimeoutError:
+            r = {'status': 'error', 'error': f'TimeoutError: page did not finish in 75 s ({kind})', 'bytes': 0}
         finally:
             if owned:
                 try:
