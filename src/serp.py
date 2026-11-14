@@ -117,48 +117,42 @@ def classify_status(engine: str, r: dict[str, Any]) -> str:
     return 'answer' if len(text) > 300 else 'no_answer'
 
 
-# Cheap poll: is the AI block there yet and how long is its text? (The full EXTRACT_JS walks every card and link,
-# far too heavy to run every second on a quarter CPU core.)
-PROBE_JS = r'''(engine)=>{
- if(engine==='google_aio'){
-   const OK=new Set(['H1','H2','DIV','SPAN']);
-   const w=document.createTreeWalker(document.body||document.documentElement, NodeFilter.SHOW_TEXT,
-     {acceptNode:(n)=>n.nodeValue&&n.nodeValue.length<20&&n.nodeValue.trim()==='AI Overview'?1:3});
-   let heading=null;
-   for(let t=w.nextNode(); t; t=w.nextNode()){
-     const e=t.parentElement;
-     if(e&&OK.has(e.tagName)&&e.childElementCount<=1&&e.innerText&&e.innerText.trim()==='AI Overview'){heading=e;break;}
-   }
-   if(!heading) return {found:false, n:-1};
-   let root=heading; const learn=document.querySelector('a[href*="p=ai_overviews"]');
-   if(learn){while(root&&!root.contains(learn)) root=root.parentElement;} else {for(let i=0;i<6&&root.parentElement;i++) root=root.parentElement;}
-   return {found:!!root, n:root?(root.innerText||'').length:-1};
- }
- const root=document.querySelector('[role=main]')||document.body; return {found:!!root, n:root?(root.innerText||'').length:-1};
-}'''
+# Wait for the AI Overview inside the page in ONE call (no CDP round trip per poll). Finds the heading with a native
+# XPath over text nodes and measures textContent (no layout); the heavy EXTRACT_JS runs once at the end.
+WAIT_JS = r"""async ([engine, maxMs, noAnswerMs, step]) => {
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const OK = new Set(['H1','H2','DIV','SPAN']);
+  const findRoot = () => {
+    if (engine !== 'google_aio') return document.querySelector('[role=main]') || document.body;
+    const it = document.evaluate("//text()[normalize-space(.)='AI Overview']", document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+    for (let i = 0; i < it.snapshotLength; i++) {
+      const e = it.snapshotItem(i).parentElement;
+      if (!e || !OK.has(e.tagName) || e.childElementCount > 1 || !e.getClientRects().length) continue;
+      let root = e; const learn = document.querySelector('a[href*="p=ai_overviews"]');
+      if (learn) { while (root && !root.contains(learn)) root = root.parentElement; }
+      else { for (let k = 0; k < 6 && root.parentElement; k++) root = root.parentElement; }
+      if (root) return root;
+    }
+    return null;
+  };
+  const t0 = Date.now(); let last = -1, stable = 0, seen = false;
+  while (Date.now() - t0 < maxMs) {
+    await sleep(step);
+    const root = findRoot();
+    if (!root) { if (!seen && Date.now() - t0 >= noAnswerMs) break; continue; }
+    seen = true;
+    const n = (root.textContent || '').length;
+    if (n > 300 && n === last) { if (++stable >= 2) break; } else stable = 0;
+    last = n;
+  }
+  return {seen, ms: Date.now() - t0};
+}"""
 
 
 async def wait_for_answer(pg, engine: str) -> dict[str, Any]:
-    """Poll (cheaply) until the AI block exists and its text stops growing (AI answers stream in), then extract once."""
-    limit = 24 if engine == 'google_aimode' else 14
-    step = 800
-    last, stable, seen = -1, 0, False
-    for i in range(limit):
-        await pg.wait_for_timeout(step)
-        pr = await pg.evaluate(PROBE_JS, engine)
-        if not pr.get('found'):
-            if engine == 'google_aio' and not seen and i >= 9:
-                break  # no AI Overview on this page (~8 s after the results rendered)
-            continue
-        seen = True
-        n = pr.get('n') or -1
-        if n > 300 and n == last:
-            stable += 1
-            if stable >= 2:
-                break
-        else:
-            stable = 0
-        last = n
+    """Wait (inside the page) until the AI block exists and its text stops growing, then extract once."""
+    max_ms = 22000 if engine == 'google_aimode' else 13000
+    await pg.evaluate(WAIT_JS, [engine, max_ms, 8000, 700])
     return await pg.evaluate(EXTRACT_JS, engine)
 
 

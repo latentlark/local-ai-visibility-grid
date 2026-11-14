@@ -162,6 +162,11 @@ async def main() -> None:
         include_maps = inp.get('includeMapsRank', True) is not False
         max_answers = max(1, int(inp.get('maxAnswers') or 60))
         conc = max(1, min(int(inp.get('maxConcurrency') or 2), 4))
+        # Each Google results page needs real CPU. Apify gives 1 CPU core per 4 GB, so at 1-2 GB two pages at once
+        # only halve each other's speed (and push memory to the limit). One page per started GB, max 4.
+        mem_mb = int(os.environ.get('ACTOR_MEMORY_MBYTES') or os.environ.get('APIFY_MEMORY_MBYTES') or 0)
+        if mem_mb and inp.get('_noConcCap') is not True:
+            conc = max(1, min(conc, mem_mb // 1024))
         gl, hl = (inp.get('country') or 'us').lower(), inp.get('language') or 'en'
         maps_kw = (inp.get('mapsKeyword') or '').strip() or None
         city = (inp.get('city') or '').strip()
