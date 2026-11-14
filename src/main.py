@@ -420,7 +420,10 @@ async def main() -> None:
             async def make_ctx(proxy_url):
                 ctx = await box['b'].new_context(locale=f'{hl}-{gl.upper()}', timezone_id=tz,
                                                  viewport={'width': 1280, 'height': 900}, user_agent=ua,
-                                                 proxy=playwright_proxy(proxy_url))
+                                                 proxy=playwright_proxy(proxy_url),
+                                                 # Google's service worker: its requests bypass Playwright's proxy-auth
+                                                 # handling (pages stalled behind Apify Proxy) and it costs CPU anyway
+                                                 service_workers='block')
                 await ctx.add_cookies([{'name': 'CONSENT', 'value': 'YES+cb', 'domain': '.google.com', 'path': '/'}])
                 return ctx
 

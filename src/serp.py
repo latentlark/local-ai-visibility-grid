@@ -161,14 +161,19 @@ WAIT_JS = r"""async ([engine, maxMs, noAnswerMs, step]) => {
 async def wait_for_answer(pg, engine: str) -> dict[str, Any]:
     """Wait (inside the page) until the AI block exists and its text stops growing, then extract once."""
     max_ms = 22000 if engine == 'google_aimode' else 13000
-    await pg.evaluate(WAIT_JS, [engine, max_ms, 8000, 700])
+    try:  # in-page timers can be frozen in a hidden window: never wait past the cap
+        await asyncio.wait_for(pg.evaluate(WAIT_JS, [engine, max_ms, 8000, 700]), max_ms / 1000 + 5)
+    except asyncio.TimeoutError:
+        pass
     return await pg.evaluate(EXTRACT_JS, engine)
 
 
 async def load_once(ctx, query: str, lat: float, lng: float, engine: str, gl: str, hl: str,
-                    screenshot: bool, cdp_block: bool = True) -> dict[str, Any]:
+                    screenshot: bool, cdp_block: bool = True, stage: dict | None = None) -> dict[str, Any]:
     """One attempt in one context. Returns {status, ...} with timings; never raises."""
     out: dict[str, Any] = {'status': 'error', 'bytes': 0, 'error': None}
+    stage = stage if stage is not None else {}
+    stage['s'] = 'new_page'
     pg = await ctx.new_page()
     t0 = time.time()
     try:
@@ -182,6 +187,7 @@ async def load_once(ctx, query: str, lat: float, lng: float, engine: str, gl: st
           except Exception:  # noqa: BLE001 - non-Chromium: load everything
             pass
         # domcontentloaded, not load: 'load' waited for every Google script and made checks take ~40 s.
+        stage['s'] = 'goto'
         await pg.goto(search_url(query, lat, lng, engine, gl, hl), timeout=30000, wait_until='domcontentloaded')
         out['gotoSecs'] = round(time.time() - t0, 1)
         if is_blocked(pg.url, ''):
@@ -191,7 +197,9 @@ async def load_once(ctx, query: str, lat: float, lng: float, engine: str, gl: st
             if is_blocked(pg.url, head):
                 out['status'] = 'blocked'
             else:
+                stage['s'] = 'wait_answer'
                 r = await wait_for_answer(pg, engine)
+                stage['s'] = 'expand'
                 if r.get('found'):
                     clicked = False
                     for label in ('Show more', 'Show all'):
@@ -214,6 +222,7 @@ async def load_once(ctx, query: str, lat: float, lng: float, engine: str, gl: st
         out['status'] = 'error'
         out['error'] = f'{type(e).__name__}: {e}'.split('\n')[0][:300]
     finally:
+        stage['s'] = 'finish'
         try:
             out['bytes'] = int(await pg.evaluate("()=>performance.getEntries().reduce((a,e)=>a+(e.transferSize||0),0)"))
         except Exception:  # noqa: BLE001
@@ -245,9 +254,11 @@ async def fetch_answer(router, query: str, lat: float, lng: float, engine: str, 
         rec['routes'].append(kind)
         try:
             # hard cap per try: a stuck page (proxy stall, frozen renderer) must never hang the run
-            r = await asyncio.wait_for(load_once(ctx, query, lat, lng, engine, gl, hl, screenshot, cdp_block=(kind != 'proxy')), 75)
+            stage: dict = {}
+            r = await asyncio.wait_for(load_once(ctx, query, lat, lng, engine, gl, hl, screenshot,
+                                                 cdp_block=(kind != 'proxy'), stage=stage), 75)
         except asyncio.TimeoutError:
-            r = {'status': 'error', 'error': f'TimeoutError: page did not finish in 75 s ({kind})', 'bytes': 0}
+            r = {'status': 'error', 'error': f'TimeoutError: page stuck at {stage.get("s")} for 75 s ({kind})', 'bytes': 0}
         finally:
             if owned:
                 try:
