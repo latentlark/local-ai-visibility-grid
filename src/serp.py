@@ -19,7 +19,16 @@ UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like
 EXTRACT_JS = r'''(engine)=>{
  let root=null;
  if(engine==='google_aio'){
-   const heading=[...document.querySelectorAll('h1,h2,div,span')].find(e=>e.childElementCount<=1&&e.innerText&&e.innerText.trim()==='AI Overview');
+   // Native XPath over text nodes instead of innerText on every div/span (that was O(page^2) text building).
+   const OKH=new Set(['H1','H2','DIV','SPAN']); let heading=null;
+   const xs=document.evaluate("//text()[normalize-space(.)='AI Overview']",document,null,XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,null);
+   for(let i=0;i<xs.snapshotLength&&!heading;i++){
+     let e=xs.snapshotItem(i).parentElement;
+     if(!e||!OKH.has(e.tagName)||e.childElementCount>1||!e.getClientRects().length) continue;
+     // outermost wrapper that is still just the heading (what the old document-order search returned)
+     while(e.parentElement&&OKH.has(e.parentElement.tagName)&&e.parentElement.childElementCount<=1&&(e.parentElement.textContent||'').trim()==='AI Overview') e=e.parentElement;
+     heading=e;
+   }
    if(!heading) return {found:false, reason:'no_ai_overview'};
    const learn=document.querySelector('a[href*="p=ai_overviews"]');
    root=heading;

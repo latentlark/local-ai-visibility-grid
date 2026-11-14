@@ -309,7 +309,7 @@ async def main() -> None:
                     state['inflight'] += 1
                     try:
                         if inp.get('paceRequests', True) is not False:
-                            await asyncio.sleep(1.5 + random.random() * 2.0)
+                            await asyncio.sleep(0.8 + random.random() * 1.2)
                         raw = await fetch_answer(router_box['r'], q, p['lat'], p['lng'], eng, gl=gl, hl=hl,
                                                  retries=3, screenshot=shots, deadline=deadline)
                     finally:
