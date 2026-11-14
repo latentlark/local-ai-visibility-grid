@@ -20,13 +20,13 @@ EXTRACT_JS = r'''(engine)=>{
  let root=null;
  if(engine==='google_aio'){
    // Native XPath over text nodes instead of innerText on every div/span (that was O(page^2) text building).
-   const OKH=new Set(['H1','H2','DIV','SPAN']); let heading=null;
+   let heading=null;
    const xs=document.evaluate("//text()[normalize-space(.)='AI Overview']",document,null,XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,null);
    for(let i=0;i<xs.snapshotLength&&!heading;i++){
+     // outermost element that is still just the heading, e.g. <div role=heading><strong>AI Overview</strong></div>
      let e=xs.snapshotItem(i).parentElement;
-     if(!e||!OKH.has(e.tagName)||e.childElementCount>1||!e.getClientRects().length) continue;
-     // outermost wrapper that is still just the heading (what the old document-order search returned)
-     while(e.parentElement&&OKH.has(e.parentElement.tagName)&&e.parentElement.childElementCount<=1&&(e.parentElement.textContent||'').trim()==='AI Overview') e=e.parentElement;
+     while(e&&e.parentElement&&(e.parentElement.textContent||'').trim()==='AI Overview') e=e.parentElement;
+     if(!e||!e.getClientRects().length) continue;
      heading=e;
    }
    if(!heading) return {found:false, reason:'no_ai_overview'};
@@ -130,13 +130,13 @@ def classify_status(engine: str, r: dict[str, Any]) -> str:
 # XPath over text nodes and measures textContent (no layout); the heavy EXTRACT_JS runs once at the end.
 WAIT_JS = r"""async ([engine, maxMs, noAnswerMs, step]) => {
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-  const OK = new Set(['H1','H2','DIV','SPAN']);
   const findRoot = () => {
     if (engine !== 'google_aio') return document.querySelector('[role=main]') || document.body;
     const it = document.evaluate("//text()[normalize-space(.)='AI Overview']", document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
     for (let i = 0; i < it.snapshotLength; i++) {
-      const e = it.snapshotItem(i).parentElement;
-      if (!e || !OK.has(e.tagName) || e.childElementCount > 1 || !e.getClientRects().length) continue;
+      let e = it.snapshotItem(i).parentElement;  // e.g. <div role=heading><strong>AI Overview</strong></div>
+      while (e && e.parentElement && (e.parentElement.textContent || '').trim() === 'AI Overview') e = e.parentElement;
+      if (!e || !e.getClientRects().length) continue;
       let root = e; const learn = document.querySelector('a[href*="p=ai_overviews"]');
       if (learn) { while (root && !root.contains(learn)) root = root.parentElement; }
       else { for (let k = 0; k < 6 && root.parentElement; k++) root = root.parentElement; }
