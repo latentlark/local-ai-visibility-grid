@@ -76,7 +76,7 @@ class Router:
                     self.direct_gen += 1
                 self.stats['direct'] += 1
                 return self.direct_ctx, 'direct', False, self.direct_gen
-        if self.stats['proxy'] == 0:
+        if self.stats['proxy'] == 0 and not self.prefer_proxy:
             logging.getLogger('apify').info('Google blocked the direct IP: next checks go through Apify Proxy '
                                             '(datacenter, new IP per try) while it cools down.')
         sid = f'lavg{random.randrange(10**9)}'

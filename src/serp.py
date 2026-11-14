@@ -166,17 +166,20 @@ async def wait_for_answer(pg, engine: str) -> dict[str, Any]:
 
 
 async def load_once(ctx, query: str, lat: float, lng: float, engine: str, gl: str, hl: str,
-                    screenshot: bool) -> dict[str, Any]:
+                    screenshot: bool, cdp_block: bool = True) -> dict[str, Any]:
     """One attempt in one context. Returns {status, ...} with timings; never raises."""
     out: dict[str, Any] = {'status': 'error', 'bytes': 0, 'error': None}
     pg = await ctx.new_page()
     t0 = time.time()
     try:
-        try:
+        # Not on proxied contexts: Playwright answers proxy auth through request interception, and a second CDP
+        # session blocking URLs there stalled every page (seen on Apify, 2026-11-14). Images stay off via launch flag.
+        if cdp_block:
+          try:
             cdp = await ctx.new_cdp_session(pg)
             await cdp.send('Network.enable')
             await cdp.send('Network.setBlockedURLs', {'urls': BLOCK_PATTERNS})
-        except Exception:  # noqa: BLE001 - non-Chromium: load everything
+          except Exception:  # noqa: BLE001 - non-Chromium: load everything
             pass
         # domcontentloaded, not load: 'load' waited for every Google script and made checks take ~40 s.
         await pg.goto(search_url(query, lat, lng, engine, gl, hl), timeout=30000, wait_until='domcontentloaded')
@@ -242,7 +245,7 @@ async def fetch_answer(router, query: str, lat: float, lng: float, engine: str, 
         rec['routes'].append(kind)
         try:
             # hard cap per try: a stuck page (proxy stall, frozen renderer) must never hang the run
-            r = await asyncio.wait_for(load_once(ctx, query, lat, lng, engine, gl, hl, screenshot), 75)
+            r = await asyncio.wait_for(load_once(ctx, query, lat, lng, engine, gl, hl, screenshot, cdp_block=(kind != 'proxy')), 75)
         except asyncio.TimeoutError:
             r = {'status': 'error', 'error': f'TimeoutError: page did not finish in 75 s ({kind})', 'bytes': 0}
         finally:
