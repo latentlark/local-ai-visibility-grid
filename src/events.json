@@ -1,0 +1,6 @@
+{
+  "_note": "Pay-per-event keys the code may charge. Must match Console Monetization. Priced: ai-answer-google-aio ($0.015) and maps-rank-check ($0.002). AI Mode key is present for the parser but is NOT priced and the code never charges it. No apify-actor-start event.",
+  "aiOverviewAnswer": "ai-answer-google-aio",
+  "aiModeAnswer": "ai-answer-google-aimode",
+  "mapsRankCheck": "maps-rank-check"
+}

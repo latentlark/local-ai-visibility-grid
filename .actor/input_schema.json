@@ -1,0 +1,166 @@
+{
+  "title": "Local AI Visibility Grid input",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "businessName": {
+      "title": "Business name",
+      "type": "string",
+      "description": "The business to check, as it appears on Google Maps (e.g. 'William Parrish Plumbing'). Add the city below. For an exact match (chains with many branches), paste the Google Maps URL instead.",
+      "editor": "textfield",
+      "prefill": "William Parrish Plumbing"
+    },
+    "city": {
+      "title": "City",
+      "type": "string",
+      "description": "City and state of the business, e.g. 'Raleigh, NC'. Used to find the business and to place the grid when no center is given.",
+      "editor": "textfield",
+      "prefill": "Raleigh, NC"
+    },
+    "mapsUrl": {
+      "title": "Google Maps URL (optional, most precise)",
+      "type": "string",
+      "description": "The business's Google Maps place link. Matching then uses its exact Google IDs, so other branches of the same chain are never counted as you.",
+      "editor": "textfield"
+    },
+    "placeId": {
+      "title": "Place ID (optional)",
+      "type": "string",
+      "description": "Google Place ID (starts with ChIJ\u2026).",
+      "editor": "textfield"
+    },
+    "questions": {
+      "title": "Questions customers ask",
+      "type": "array",
+      "description": "What people type into Google, e.g. 'best emergency plumber near me'. Each question is asked at every point. Up to 10.",
+      "editor": "stringList",
+      "prefill": [
+        "best emergency plumber near me"
+      ]
+    },
+    "points": {
+      "title": "Points (optional: overrides the grid)",
+      "type": "array",
+      "description": "Exact locations to check, one per line as 'lat,lng' or 'lat,lng|label'. Leave empty to use the N\u00d7N grid below around the center (or the business). The prefill checks downtown Raleigh plus 8 km north and 8 km west: clear it when you check your own business.",
+      "editor": "stringList",
+      "prefill": [
+        "35.78045,-78.63518|center",
+        "35.85239,-78.63518|north 8 km",
+        "35.78045,-78.72386|west 8 km"
+      ]
+    },
+    "center": {
+      "title": "Grid center (optional)",
+      "type": "string",
+      "description": "Address, city or 'lat,lng'. Empty = the business's own location.",
+      "editor": "textfield"
+    },
+    "gridSize": {
+      "title": "Grid size",
+      "type": "integer",
+      "description": "Points per side, odd number: 1 = just the center, 3 = 9 points, 5 = 25, 7 = 49. Used when 'Points' is empty.",
+      "default": 3,
+      "minimum": 1,
+      "maximum": 7
+    },
+    "gridSpacingKm": {
+      "title": "Distance between points (km)",
+      "type": "number",
+      "description": "Spacing between neighbouring grid points. 2-3 km for a city, 5-8 km for a metro area. Ignored if 'Radius' is set.",
+      "default": 3,
+      "minimum": 0.2,
+      "maximum": 50,
+      "unit": "km"
+    },
+    "radiusKm": {
+      "title": "Radius (km, optional)",
+      "type": "number",
+      "description": "Alternative to spacing: distance from the center to the grid edge.",
+      "minimum": 0.2,
+      "maximum": 100,
+      "unit": "km"
+    },
+    "samplesPerPoint": {
+      "title": "Samples per point",
+      "type": "integer",
+      "description": "How many times each question is asked at each point. AI answers vary between asks; 2-3 samples give a steadier visibility share.",
+      "default": 2,
+      "prefill": 1,
+      "minimum": 1,
+      "maximum": 5
+    },
+    "includeAiOverviews": {
+      "title": "Google AI Overviews",
+      "type": "boolean",
+      "description": "Check the AI Overview box at the top of Google results. Charged only when Google shows an AI Overview.",
+      "default": true
+    },
+    "includeAiMode": {
+      "title": "Google AI Mode (beta)",
+      "type": "boolean",
+      "description": "Also ask Google AI Mode. Beta and free (not charged). Google often blocks automated AI Mode visits, so many checks return no answer. Switched off for the rest of the run after 4 blocks in a row.",
+      "default": false
+    },
+    "includeMapsRank": {
+      "title": "Google Maps rank at each point",
+      "type": "boolean",
+      "description": "Also record the business's organic Google Maps rank (top 20) for each question at each point, so you can compare map rank with AI visibility.",
+      "default": true
+    },
+    "mapsKeyword": {
+      "title": "Maps keyword (optional)",
+      "type": "string",
+      "description": "Keyword for the Maps rank, e.g. 'plumber'. Empty = use each question as typed.",
+      "editor": "textfield"
+    },
+    "maxAnswers": {
+      "title": "Max paid answers",
+      "type": "integer",
+      "description": "Safety cap: the run stops cleanly after this many AI answers. Points \u00d7 questions \u00d7 samples should fit under it. You can also set a maximum cost per run in the run options.",
+      "default": 60,
+      "prefill": 10,
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "maxConcurrency": {
+      "title": "Parallel browsers",
+      "type": "integer",
+      "description": "Answers loaded at the same time. 1 is the default and is more reliable; 2 is faster but may raise blocks.",
+      "default": 1,
+      "minimum": 1,
+      "maximum": 4
+    },
+    "country": {
+      "title": "Country (gl)",
+      "type": "string",
+      "description": "Google country code. AI Overviews with local businesses are most reliable in the US.",
+      "editor": "textfield",
+      "default": "us"
+    },
+    "language": {
+      "title": "Language (hl)",
+      "type": "string",
+      "description": "Google interface language code.",
+      "editor": "textfield",
+      "default": "en"
+    },
+    "saveScreenshots": {
+      "title": "Save screenshots",
+      "type": "boolean",
+      "description": "Save a screenshot of every answer page to the key-value store (for proof or debugging).",
+      "default": false
+    },
+    "proxyConfiguration": {
+      "title": "Proxy",
+      "type": "object",
+      "description": "Optional fallback only. Leave off for normal use: the Actor pins location with Google's uule parameter and runs on Apify's US servers without a proxy (recommended). If a large grid returns many blocked rows, you can turn on a proxy (residential is the usual fallback). Proxy traffic is billed extra by Apify.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": false
+      }
+    }
+  },
+  "required": [
+    "questions"
+  ]
+}

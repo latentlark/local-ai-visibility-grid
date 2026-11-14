@@ -1,0 +1,16 @@
+{
+  "actorSpecification": 1,
+  "name": "local-ai-visibility-grid",
+  "title": "Local AI Visibility Grid (Google AI Overviews + Maps)",
+  "description": "Is your local business named in Google AI Overviews? Ask customer questions at every point of a map grid: AI visibility share per point, competitors AI names (matched to Maps place IDs), cited sites, and your Maps rank there. AI Mode beta.",
+  "version": "0.1",
+  "buildTag": "latest",
+  "input": "./input_schema.json",
+  "storages": {
+    "dataset": "./dataset_schema.json"
+  },
+  "output": "./output_schema.json",
+  "dockerfile": "../Dockerfile",
+  "readme": "../README.md",
+  "defaultMemoryMbytes": 1024
+}

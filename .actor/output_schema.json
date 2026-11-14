@@ -1,0 +1,11 @@
+{
+  "actorOutputSchemaVersion": 1,
+  "title": "AI visibility grid",
+  "description": "One dataset item per point × question × sample, plus a summary, an HTML report and a CSV.",
+  "properties": {
+    "overview": { "type": "string", "title": "Answers per point", "description": "AI answer found, target named and position, competitors, cited domains and Maps rank.", "template": "{{links.apiDefaultDatasetUrl}}/items?view=overview" },
+    "report": { "type": "string", "title": "HTML report", "description": "Visibility heat grid, per question, top competitors and top cited sites.", "template": "{{links.apiDefaultKeyValueStoreUrl}}/records/REPORT.html" },
+    "summary": { "type": "string", "title": "Summary (JSON)", "description": "Visibility share per point, per question and per engine; top competitors; top cited domains.", "template": "{{links.apiDefaultKeyValueStoreUrl}}/records/SUMMARY" },
+    "csv": { "type": "string", "title": "CSV", "description": "One line per check for spreadsheets.", "template": "{{links.apiDefaultKeyValueStoreUrl}}/records/REPORT.csv" }
+  }
+}

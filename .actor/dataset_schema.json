@@ -1,0 +1,36 @@
+{
+  "actorSpecification": 1,
+  "fields": {},
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "transformation": {
+        "fields": ["engine", "pointLabel", "lat", "lng", "question", "sample", "status", "answerFound", "targetMentioned", "targetPosition", "businessesNamed", "mapsRank", "citedDomains", "charged"]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "engine": { "label": "Engine", "format": "text" },
+          "pointLabel": { "label": "Point", "format": "text" },
+          "lat": { "label": "Lat", "format": "number" },
+          "lng": { "label": "Lng", "format": "number" },
+          "question": { "label": "Question", "format": "text" },
+          "sample": { "label": "Sample", "format": "number" },
+          "status": { "label": "Status", "format": "text" },
+          "answerFound": { "label": "AI answer", "format": "boolean" },
+          "targetMentioned": { "label": "You named", "format": "boolean" },
+          "targetPosition": { "label": "Your position", "format": "number" },
+          "businessesNamed": { "label": "Businesses named", "format": "number" },
+          "mapsRank": { "label": "Maps rank", "format": "number" },
+          "citedDomains": { "label": "Cited domains", "format": "array" },
+          "charged": { "label": "Charged", "format": "boolean" }
+        }
+      }
+    },
+    "competitors": {
+      "title": "Businesses named",
+      "transformation": { "fields": ["engine", "pointLabel", "question", "sample", "businesses"], "unwind": ["businesses"] },
+      "display": { "component": "table" }
+    }
+  }
+}
