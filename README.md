@@ -43,7 +43,7 @@
 | `includeAiMode` | Google AI Mode, **beta and free**, default off |
 | `includeMapsRank` / `mapsKeyword` | Maps rank (top 20) per point × question. Optional fixed Maps keyword, e.g. `plumber` |
 | `maxAnswers` | Safety cap on paid AI Overview answers per run. The run stops cleanly when reached |
-| `maxConcurrency` | Parallel browsers (1–4). **Default 1** is more reliable; 2 is faster but may raise blocks |
+| `maxConcurrency` | Parallel browsers (1–4). **Default 1.** Capped at 1 per GB of run memory: each Google page needs real CPU, and at 1 GB a second page only slows the first one down |
 | `country` / `language` | Google `gl` / `hl` codes (US English works best for local AI Overviews) |
 | `saveScreenshots` | Save a screenshot of every answer page (proof for clients) |
 | `proxyConfiguration` | **Optional fallback only.** Leave off for normal use |
@@ -88,7 +88,7 @@ One dataset item per **point × question × sample** (and engine):
   "answerText": "AI Overview\nTop-rated emergency plumbers in the Raleigh, NC area ..."
 }
 ```
-- `status`: `answer` (an AI Overview was parsed; Google AI Overviews are charged, AI Mode is free), `no_answer` (Google showed no AI Overview there, free), `blocked` (free), `error` (free).
+- `status`: `answer` (an AI Overview was parsed; Google AI Overviews are charged, AI Mode is free), `no_answer` (Google showed no AI Overview there, free), `blocked` (free), `error` (free), `skipped_blocked` / `skipped_time_limit` (one summary row for checks not run, free).
 - `citedDomains` = every site linked in the answer, including the businesses' own sites. `sourceDomains` = sources linked outside the business cards.
 - `matchMethod`: `google_card_hex_id` (exact ID from Google's own card in the answer) or `maps_name_match (score)` (name looked up on Maps near that point).
 
@@ -122,12 +122,13 @@ Example costs at these prices (upper bound if every check returns an answer):
 | 7×7 grid × 3 questions × 3 samples | ≤441 | 147 | ≈ $6.92 |
 
 ## How it works and limitations
-- Each check is a logged-out browser visit to Google. The searcher's location is pinned to that grid point with Google's `uule` parameter — not browser geolocation. One browser context (and the consent cookie) is reused across the grid. Requests are paced with a short delay by default.
+- Each check is a logged-out visit to Google in a real (non-headless) Chrome window. The searcher's location is pinned to that grid point with Google's `uule` parameter, not browser geolocation. One browser context (and the consent cookie) is reused across the grid, with a short delay between checks.
+- **When Google blocks a check**, that browser context is thrown away (fresh cookies), the run pauses to let the IP cool down (90 s, then longer), and the check is retried. If Google keeps blocking every retry (8 checks in a row), the run stops early and adds one `skipped_blocked` row: those checks were not run and are **not charged**.
 - **No proxy is needed in normal use.** The Actor runs on Apify's US servers. If a large grid returns many `blocked` rows, you can turn on a proxy as an **optional fallback** (residential is the usual choice). Proxy traffic is billed separately by Apify and is not included in the event prices above.
 - **Google doesn't show an AI Overview for every question, every time.** Those rows come back as `no_answer` and are free. Commercial "near me" questions get local AI Overviews most often in the US.
 - AI answers vary between asks and through the day. Use 2–3 samples per point and compare shares, not single answers.
 - **AI Mode is beta and free.** Google blocks many automated AI Mode visits. After 4 blocks in a row AI Mode is switched off for the rest of the run (still not charged).
-- Each answer page is heavy (about 5 MB, often 10–25 s plus pacing), so big grids take a while: a 5×5 × 3 questions × 2 samples run takes on the order of 30–40 minutes at 2 parallel browsers, longer at the default of 1.
+- Each check takes about 15–30 s (Google needs time to write the AI answer), so big grids take a while: 100 checks (5×5 × 2 questions × 2 samples) take roughly 40–50 minutes at the default 1 GB. Long runs stop cleanly before the run timeout: unfinished checks are listed in one `skipped_time_limit` row and not charged.
 - Public Google results only. No login, no personal data. Google can change its page layout; we monitor the parser.
 
 ## FAQ
